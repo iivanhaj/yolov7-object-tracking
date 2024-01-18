@@ -7,6 +7,7 @@ from pathlib import Path
 from numpy import random
 from random import randint
 import torch.backends.cudnn as cudnn
+import pyrealsense2 as rs
 
 from models.experimental import attempt_load
 from utils.datasets import LoadStreams, LoadImages
@@ -181,6 +182,11 @@ def detect(save_img=False):
                     n = (det[:, -1] == c).sum()  # detections per class
                     s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
 
+                    # Draw bounding boxes and labels on the image
+                    for *xyxy, conf, detclass in det:
+                        label = f'{names[int(detclass)]} {conf:.2f}'
+                        plot_one_box(xyxy, im0, label=label, color=colors[int(detclass)], line_thickness=3)
+
                 #..................USE TRACK FUNCTION....................
                 #pass an empty array to sort
                 dets_to_sort = np.empty((0,6))
@@ -224,7 +230,8 @@ def detect(save_img=False):
                         if save_bbox_dim:
                             txt_str += " %f %f" % (np.abs(track.bbox_history[-1][0] - track.bbox_history[-1][2]) / im0.shape[0], np.abs(track.bbox_history[-1][1] - track.bbox_history[-1][3]) / im0.shape[1])
                         txt_str += "\n"
-                
+                    # Print the class name and centroid coordinates
+                    print(f'Track ID {track.id}: {names[int(track.detclass)]} - Centroid: {track.centroidarr[-1]}')
                 if save_txt and not save_with_object_id:
                     with open(txt_path + '.txt', 'a') as f:
                         f.write(txt_str)
@@ -249,6 +256,24 @@ def detect(save_img=False):
                 if cv2.waitKey(1) == ord('q'):  # q to quit
                   cv2.destroyAllWindows()
                   raise StopIteration
+
+        #display video result
+        # draw boxes for visualization
+        if len(tracked_dets) > 0:
+            bbox_xyxy = tracked_dets[:, :4]
+            identities = tracked_dets[:, 8]
+            categories = tracked_dets[:, 4]
+            draw_boxes(im0, bbox_xyxy, identities, categories, names, save_with_object_id, txt_path)
+
+            # Display the frame with tracking boxes
+            display_size = (800, 600)  
+            resized_frame = cv2.resize(im0, display_size)
+            cv2.imshow('Object Tracking', resized_frame)
+
+            if cv2.waitKey(1) == ord('q'):  # press 'q' to quit
+                cv2.destroyAllWindows()
+                raise StopIteration
+
 
             # Save results (image with detections)
             if save_img:
@@ -276,6 +301,47 @@ def detect(save_img=False):
 
     print(f'Done. ({time.time() - t0:.3f}s)')
 
+def get_depth_frame():
+    # Configure depth and color streams
+    pipeline = rs.pipeline()
+    config = rs.config()
+    config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+    config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+
+    # Start streaming
+    pipeline.start(config)
+
+    try:
+        while True:
+            # Wait for a coherent pair of frames: depth and color
+            frames = pipeline.wait_for_frames()
+            depth_frame = frames.get_depth_frame()
+            color_frame = frames.get_color_frame()
+
+            if not depth_frame or not color_frame:
+                continue
+
+            # Convert images to numpy arrays
+            depth_image = np.asanyarray(depth_frame.get_data())
+            color_image = np.asanyarray(color_frame.get_data())
+
+            # Get the center pixel coordinates
+            center_row = depth_frame.height // 2
+            center_col = depth_frame.width // 2
+
+            # Example: Get depth value at the center pixel
+            center_depth_value = depth_frame.get_distance(center_col, center_row)
+
+            print(f"Depth value at center pixel ({center_col}, {center_row}): {center_depth_value} meters")
+
+            cv2.imshow("Color Frame", color_image)
+            cv2.imshow("Depth Frame", depth_image)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+        
+    finally:
+        # Stop streaming
+        pipeline.stop()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -302,6 +368,19 @@ if __name__ == '__main__':
     parser.add_argument('--colored-trk', action='store_true', help='assign different color to every track')
     parser.add_argument('--save-bbox-dim', action='store_true', help='save bounding box dimensions with --save-txt tracks')
     parser.add_argument('--save-with-object-id', action='store_true', help='save results with object id to *.txt')
+    opt = parser.parse_args()
+    #get_depth_frame()
+    with torch.no_grad():
+        if opt.update:  # update all models (to fix SourceChangeWarning)
+            for opt.weights in ['yolov7-tiny.pt']:
+                detect()
+                strip_optimizer(opt.weights)
+        else:
+            detect()
+
+        # After the detection is complete, wait for a key press to close the display window
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
 
     parser.set_defaults(download=True)
     opt = parser.parse_args()
